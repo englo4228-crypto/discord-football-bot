@@ -8,7 +8,6 @@ const { fullTimeEmbed } = require('../utils/embeds');
 
 const EXACT_SCORE_POINTS = 3;
 const CORRECT_RESULT_POINTS = 1;
-const FIRST_SCORER_BONUS = 1;
 
 function actualResult(homeGoals, awayGoals) {
   if (homeGoals > awayGoals) return 'home';
@@ -22,18 +21,11 @@ function predictedResult(predictedHome, predictedAway) {
   return 'draw';
 }
 
-async function resolveActualFirstScorer(fixtureId) {
-  const events = await footballApi.getFixtureEvents(fixtureId);
-  const firstGoal = events.find((e) => e.type === 'Goal');
-  return firstGoal?.player?.name || null;
-}
-
-async function scorePredictions(fixture) {
+function scorePredictions(fixture) {
   const { home: homeGoals, away: awayGoals } = fixture.goals;
   const pending = predictions.getUnresolvedForFixture(fixture.fixture.id);
   if (pending.length === 0) return;
 
-  const actualFirstScorer = await resolveActualFirstScorer(fixture.fixture.id);
   const result = actualResult(homeGoals, awayGoals);
 
   for (const prediction of pending) {
@@ -43,14 +35,6 @@ async function scorePredictions(fixture) {
       points += EXACT_SCORE_POINTS;
     } else if (predictedResult(prediction.predicted_home, prediction.predicted_away) === result) {
       points += CORRECT_RESULT_POINTS;
-    }
-
-    if (
-      prediction.first_scorer &&
-      actualFirstScorer &&
-      actualFirstScorer.toLowerCase().includes(prediction.first_scorer.toLowerCase())
-    ) {
-      points += FIRST_SCORER_BONUS;
     }
 
     predictions.resolvePrediction(prediction.id, points);
@@ -89,8 +73,9 @@ function findSubscribedChannels(client, fixture) {
   const all = subscriptions.all();
   const relevant = all.filter(
     (s) =>
-      (s.type === 'league' && s.target_id === fixture.league.id) ||
-      (s.type === 'team' && (s.target_id === fixture.teams.home.id || s.target_id === fixture.teams.away.id))
+      (s.type === 'league' && s.target_id === String(fixture.league.id)) ||
+      (s.type === 'team' &&
+        (s.target_id === String(fixture.teams.home.id) || s.target_id === String(fixture.teams.away.id)))
   );
   const uniqueChannelIds = [...new Set(relevant.map((s) => s.channel_id))];
   return uniqueChannelIds
@@ -98,23 +83,30 @@ function findSubscribedChannels(client, fixture) {
     .filter((c) => c && c.isTextBased());
 }
 
+/** Only genuinely-finished matches (not postponed/cancelled/suspended) resolve predictions. */
+function isDecided(fixture) {
+  return footballApi.FINISHED_SHORT_STATUSES.has(fixture.fixture.status.short);
+}
+
 async function handleMatchEnd(client, fixture) {
   const fixtureId = fixture.fixture.id;
   if (matchTracking.getLastStatus(fixtureId)?.resolved) return;
 
-  await scorePredictions(fixture);
+  if (isDecided(fixture)) {
+    scorePredictions(fixture);
 
-  const guildIds = [...new Set(subscriptions.all().map((s) => s.guild_id))];
-  await Promise.all(guildIds.map((guildId) => syncPunditRole(client, guildId)));
+    const guildIds = [...new Set(subscriptions.all().map((s) => s.guild_id))];
+    await Promise.all(guildIds.map((guildId) => syncPunditRole(client, guildId)));
 
-  const channels = findSubscribedChannels(client, fixture);
-  if (channels.length > 0) {
-    const embed = fullTimeEmbed(fixture);
-    const highlight = await highlights.findHighlightForFixture(fixture.teams.home.name, fixture.teams.away.name);
-    if (highlight) {
-      embed.addFields({ name: '🎥 Highlights', value: `[${highlight.title}](${highlight.url})` });
+    const channels = findSubscribedChannels(client, fixture);
+    if (channels.length > 0) {
+      const embed = fullTimeEmbed(fixture);
+      const highlight = await highlights.findHighlightForFixture(fixture.teams.home.name, fixture.teams.away.name);
+      if (highlight) {
+        embed.addFields({ name: '🎥 Highlights', value: `[${highlight.title}](${highlight.url})` });
+      }
+      await Promise.all(channels.map((channel) => channel.send({ embeds: [embed] }).catch(() => null)));
     }
-    await Promise.all(channels.map((channel) => channel.send({ embeds: [embed] }).catch(() => null)));
   }
 
   matchTracking.markFixtureResolved(fixtureId);

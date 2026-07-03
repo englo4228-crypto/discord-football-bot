@@ -18,9 +18,6 @@ const data = new SlashCommandBuilder()
   )
   .addIntegerOption((opt) =>
     opt.setName('away_score').setDescription('Predicted away team goals').setRequired(true).setMinValue(0)
-  )
-  .addStringOption((opt) =>
-    opt.setName('first_scorer').setDescription('Who scores first? (optional, bonus point)').setRequired(false)
   );
 
 async function getUpcomingFixtures() {
@@ -59,7 +56,6 @@ async function execute(interaction) {
   const fixtureId = Number(interaction.options.getString('fixture', true));
   const homeScore = interaction.options.getInteger('home_score', true);
   const awayScore = interaction.options.getInteger('away_score', true);
-  const firstScorer = interaction.options.getString('first_scorer');
 
   const fixtures = await getUpcomingFixtures();
   const fixture = fixtures.find((f) => f.fixture.id === fixtureId);
@@ -84,14 +80,12 @@ async function execute(interaction) {
     awayTeam: fixture.teams.away.name,
     predictedHome: homeScore,
     predictedAway: awayScore,
-    firstScorer: firstScorer || null,
     kickoffUtc: fixture.fixture.date,
   });
 
   await interaction.editReply(
     `✅ Prediction saved: **${fixture.teams.home.name} ${homeScore} - ${awayScore} ${fixture.teams.away.name}**` +
-      (firstScorer ? `\nFirst scorer: **${firstScorer}**` : '') +
-      '\n\nScoring: 3 pts exact score, 1 pt correct winner/draw, +1 bonus for correct first scorer.'
+      '\n\nScoring: 3 pts for an exact score, 1 pt for correctly picking the winner/draw.'
   );
 }
 

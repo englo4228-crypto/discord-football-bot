@@ -14,9 +14,12 @@ const COLORS = {
 
 function statusLabel(status) {
   if (status.short === 'HT') return 'Half-time';
-  if (['1H', '2H', 'ET', 'P', 'LIVE'].includes(status.short)) return `${status.elapsed}'`;
-  if (status.short === 'FT') return 'Full-time';
+  if (status.short === '1H') return status.elapsed != null ? `${status.elapsed}'` : 'Live';
+  if (status.short === 'FT' || status.short === 'AWD') return 'Full-time';
   if (status.short === 'NS') return 'Not started';
+  if (status.short === 'SUSP') return 'Suspended';
+  if (status.short === 'PST') return 'Postponed';
+  if (status.short === 'CANC') return 'Cancelled';
   return status.long;
 }
 
@@ -56,54 +59,18 @@ function liveMatchesEmbed(fixtures) {
   return embed;
 }
 
-/** Rich embed for a single match/event feed post. */
-function eventEmbed(fixture, event) {
-  const type = (event.type || '').toLowerCase();
-  const detail = (event.detail || '').toLowerCase();
-
-  let emoji = 'ℹ️';
-  let color = COLORS.info;
-  if (type === 'goal') {
-    emoji = detail.includes('penalty') ? '🎯' : '⚽';
-    color = COLORS.goal;
-  } else if (type === 'card') {
-    if (detail.includes('red')) {
-      emoji = '🟥';
-      color = COLORS.redCard;
-    } else {
-      emoji = '🟨';
-      color = COLORS.yellowCard;
-    }
-  } else if (type === 'subst') {
-    emoji = '🔄';
-    color = COLORS.subst;
-  } else if (type === 'var') {
-    emoji = '🖥️';
-    color = COLORS.var;
-  }
-
-  const embed = new EmbedBuilder()
-    .setColor(color)
+/**
+ * Goal notification posted when the live score changes. football-data.org's
+ * free tier doesn't expose minute-by-minute event data (scorer, assist, cards,
+ * subs), so this is a score-diff-based ping rather than a full event feed.
+ */
+function goalEmbed(fixture, scoringTeamName) {
+  return new EmbedBuilder()
+    .setColor(COLORS.goal)
     .setAuthor({ name: `${fixture.teams.home.name} vs ${fixture.teams.away.name}` })
+    .setDescription(`⚽ **Goal for ${scoringTeamName}!**\n\n${scoreLine(fixture)}`)
+    .setThumbnail(fixture.league.logo || null)
     .setTimestamp();
-
-  const minute = event.time.elapsed + (event.time.extra ? `+${event.time.extra}` : '');
-  let description = `${emoji} **${event.type}** — ${event.detail} (${minute}')\n`;
-  description += `${event.team.name}: **${event.player?.name || 'Unknown'}**`;
-  if (event.assist?.name && type === 'goal') {
-    description += ` (assist: ${event.assist.name})`;
-  }
-  if (type === 'subst' && event.assist?.name) {
-    description += ` ⬅ ${event.assist.name}`;
-  }
-  if (event.comments) {
-    description += `\n*${event.comments}*`;
-  }
-  description += `\n\n${scoreLine(fixture)}`;
-
-  embed.setDescription(description);
-  embed.setThumbnail(fixture.league.logo || null);
-  return embed;
 }
 
 function kickoffPingEmbed(fixture) {
@@ -172,28 +139,6 @@ function standingsEmbed(leagueName, standings) {
   return embed;
 }
 
-function playerEmbed(playerData) {
-  const { player, statistics } = playerData;
-  const stat = statistics[0] || {};
-  const embed = new EmbedBuilder()
-    .setTitle(`👤 ${player.name}`)
-    .setColor(COLORS.info)
-    .setThumbnail(player.photo || null)
-    .addFields(
-      { name: 'Team', value: stat.team?.name || 'N/A', inline: true },
-      { name: 'Position', value: stat.games?.position || 'N/A', inline: true },
-      { name: 'Appearances', value: String(stat.games?.appearences ?? 0), inline: true },
-      { name: 'Goals', value: String(stat.goals?.total ?? 0), inline: true },
-      { name: 'Assists', value: String(stat.goals?.assists ?? 0), inline: true },
-      { name: 'Clean sheets', value: String(stat.goals?.conceded != null ? stat.goals.conceded : 'N/A'), inline: true },
-      { name: 'Pass accuracy', value: stat.passes?.accuracy ? `${stat.passes.accuracy}%` : 'N/A', inline: true },
-      { name: 'Yellow cards', value: String(stat.cards?.yellow ?? 0), inline: true },
-      { name: 'Red cards', value: String(stat.cards?.red ?? 0), inline: true }
-    )
-    .setTimestamp();
-  return embed;
-}
-
 function formToEmojis(form) {
   if (!form) return 'N/A';
   return [...form]
@@ -203,16 +148,15 @@ function formToEmojis(form) {
 
 function formEmbed(teamName, stats) {
   const embed = new EmbedBuilder()
-    .setTitle(`📈 ${teamName} — Recent Form`)
+    .setTitle(`📈 ${teamName} — Recent Form (last ${stats.played})`)
     .setColor(COLORS.info)
     .setDescription(formToEmojis(stats.form))
     .addFields(
-      { name: 'Played', value: String(stats.fixtures?.played?.total ?? 0), inline: true },
-      { name: 'Wins', value: String(stats.fixtures?.wins?.total ?? 0), inline: true },
-      { name: 'Draws', value: String(stats.fixtures?.draws?.total ?? 0), inline: true },
-      { name: 'Losses', value: String(stats.fixtures?.loses?.total ?? 0), inline: true },
-      { name: 'Goals For', value: String(stats.goals?.for?.total?.total ?? 0), inline: true },
-      { name: 'Goals Against', value: String(stats.goals?.against?.total?.total ?? 0), inline: true }
+      { name: 'Wins', value: String(stats.wins ?? 0), inline: true },
+      { name: 'Draws', value: String(stats.draws ?? 0), inline: true },
+      { name: 'Losses', value: String(stats.losses ?? 0), inline: true },
+      { name: 'Goals For', value: String(stats.goalsFor ?? 0), inline: true },
+      { name: 'Goals Against', value: String(stats.goalsAgainst ?? 0), inline: true }
     )
     .setTimestamp();
   return embed;
@@ -247,12 +191,11 @@ module.exports = {
   statusLabel,
   scoreLine,
   liveMatchesEmbed,
-  eventEmbed,
+  goalEmbed,
   kickoffPingEmbed,
   fullTimeEmbed,
   fixturesListEmbed,
   standingsEmbed,
-  playerEmbed,
   formEmbed,
   formToEmojis,
   leaderboardEmbed,

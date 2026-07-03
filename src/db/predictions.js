@@ -2,12 +2,11 @@ const db = require('./database');
 
 const insertStmt = db.prepare(`
   INSERT INTO predictions
-    (guild_id, user_id, fixture_id, home_team, away_team, predicted_home, predicted_away, first_scorer, kickoff_utc)
-  VALUES (@guildId, @userId, @fixtureId, @homeTeam, @awayTeam, @predictedHome, @predictedAway, @firstScorer, @kickoffUtc)
+    (guild_id, user_id, fixture_id, home_team, away_team, predicted_home, predicted_away, kickoff_utc)
+  VALUES (@guildId, @userId, @fixtureId, @homeTeam, @awayTeam, @predictedHome, @predictedAway, @kickoffUtc)
   ON CONFLICT(guild_id, user_id, fixture_id) DO UPDATE SET
     predicted_home = excluded.predicted_home,
-    predicted_away = excluded.predicted_away,
-    first_scorer = excluded.first_scorer
+    predicted_away = excluded.predicted_away
 `);
 
 const unresolvedForFixtureStmt = db.prepare(`

@@ -20,11 +20,11 @@ const listForGuildStmt = db.prepare(`
 const allStmt = db.prepare(`SELECT * FROM subscriptions`);
 
 function addSubscription({ guildId, channelId, type, targetId, targetName }) {
-  return insertStmt.run({ guildId, channelId, type, targetId, targetName });
+  return insertStmt.run({ guildId, channelId, type, targetId: String(targetId), targetName });
 }
 
 function removeSubscription({ channelId, type, targetId }) {
-  return deleteStmt.run(channelId, type, targetId);
+  return deleteStmt.run(channelId, type, String(targetId));
 }
 
 function listForChannel(channelId) {

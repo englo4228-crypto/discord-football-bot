@@ -14,7 +14,7 @@ db.exec(`
     guild_id TEXT NOT NULL,
     channel_id TEXT NOT NULL,
     type TEXT NOT NULL CHECK(type IN ('team', 'league')),
-    target_id INTEGER NOT NULL,
+    target_id TEXT NOT NULL,
     target_name TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(channel_id, type, target_id)
@@ -39,15 +39,11 @@ db.exec(`
     pundit_role_id TEXT
   );
 
-  CREATE TABLE IF NOT EXISTS posted_events (
-    fixture_id INTEGER NOT NULL,
-    event_key TEXT NOT NULL,
-    PRIMARY KEY (fixture_id, event_key)
-  );
-
   CREATE TABLE IF NOT EXISTS fixture_status (
     fixture_id INTEGER PRIMARY KEY,
     last_status TEXT NOT NULL,
+    last_home_goals INTEGER NOT NULL DEFAULT 0,
+    last_away_goals INTEGER NOT NULL DEFAULT 0,
     resolved INTEGER NOT NULL DEFAULT 0
   );
 
@@ -60,7 +56,6 @@ db.exec(`
     away_team TEXT NOT NULL,
     predicted_home INTEGER NOT NULL,
     predicted_away INTEGER NOT NULL,
-    first_scorer TEXT,
     kickoff_utc TEXT NOT NULL,
     points INTEGER,
     resolved INTEGER NOT NULL DEFAULT 0,

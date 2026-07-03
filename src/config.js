@@ -13,10 +13,12 @@ module.exports = {
   discordClientId: required('DISCORD_CLIENT_ID'),
   devGuildId: process.env.DISCORD_DEV_GUILD_ID || null,
 
-  footballApiKey: required('FOOTBALL_API_KEY'),
-  footballApiHost: process.env.FOOTBALL_API_HOST || 'v3.football.api-sports.io',
+  footballDataApiKey: required('FOOTBALL_DATA_API_KEY'),
+  footballDataBaseUrl: 'https://api.football-data.org/v4',
 
-  livePollIntervalSeconds: Number(process.env.LIVE_POLL_INTERVAL_SECONDS) || 60,
+  // football-data.org's free tier is capped at 10 requests/minute; keep the
+  // poll interval at or above this floor so a single tick can't itself queue
+  // up more than the budget allows.
+  livePollIntervalSeconds: Math.max(Number(process.env.LIVE_POLL_INTERVAL_SECONDS) || 60, 60),
   defaultTimezone: process.env.DEFAULT_TIMEZONE || 'UTC',
-  footballSeason: Number(process.env.FOOTBALL_SEASON) || new Date().getFullYear(),
 };
