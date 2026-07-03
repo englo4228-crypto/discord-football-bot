@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { Client, GatewayIntentBits, Collection } = require('discord.js');
 const config = require('./config');
+const footballApi = require('./api/footballApi');
 const { startLivePoller } = require('./services/liveEventPoller');
 
 const client = new Client({
@@ -19,6 +20,9 @@ for (const file of fs.readdirSync(commandsPath).filter((f) => f.endsWith('.js'))
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
   startLivePoller(client);
+  // Best-effort background warm-up so the first /subscribe or /favorite
+  // isn't stuck waiting on the rate limiter to fetch every competition's teams.
+  footballApi.warmTeamCache().catch((err) => console.warn('[index] Team cache warm-up failed:', err.message));
 });
 
 client.on('interactionCreate', async (interaction) => {

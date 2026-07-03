@@ -1,118 +1,242 @@
 const axios = require('axios');
 const config = require('../config');
 const { cached } = require('../utils/cache');
+const { RateLimiter } = require('../utils/rateLimiter');
 const { MAJOR_LEAGUE_IDS } = require('../utils/leagues');
 
 const client = axios.create({
-  baseURL: `https://${config.footballApiHost}`,
-  headers: {
-    'x-apisports-key': config.footballApiKey,
-  },
-  timeout: 10000,
+  baseURL: config.footballDataBaseUrl,
+  headers: { 'X-Auth-Token': config.footballDataApiKey },
+  timeout: 15000,
 });
 
-async function request(endpoint, params = {}) {
+// football-data.org's free tier is hard-capped at 10 requests/minute across
+// the whole API key, so every call funnels through one limiter regardless of
+// which guild or command triggered it.
+const limiter = new RateLimiter(10, 60_000);
+
+async function request(endpoint, params = {}, { retryOn429 = true } = {}) {
   try {
-    const { data } = await client.get(endpoint, { params });
-    if (data.errors && Array.isArray(data.errors) ? data.errors.length : Object.keys(data.errors || {}).length) {
-      console.error(`[footballApi] API error on ${endpoint}:`, data.errors);
-    }
-    return data.response || [];
+    const { data } = await limiter.schedule(() => client.get(endpoint, { params }));
+    return data;
   } catch (err) {
+    if (err.response?.status === 429 && retryOn429) {
+      const retryAfterSeconds = Number(err.response.headers['retry-after']) || 15;
+      console.warn(`[footballApi] 429 from ${endpoint}, retrying in ${retryAfterSeconds}s`);
+      await new Promise((resolve) => setTimeout(resolve, retryAfterSeconds * 1000));
+      return request(endpoint, params, { retryOn429: false });
+    }
     console.error(`[footballApi] Request failed: ${endpoint}`, err.response?.data || err.message);
-    throw new Error(`Football API request to ${endpoint} failed`);
+    throw new Error(`Football-Data.org request to ${endpoint} failed`);
   }
 }
 
-/** All fixtures currently in play. Optionally filtered to a set of league IDs. */
-async function getLiveFixtures(leagueIds = MAJOR_LEAGUE_IDS) {
-  const fixtures = await cached('live-fixtures', 20_000, () => request('/fixtures', { live: 'all' }));
-  if (!leagueIds || leagueIds.length === 0) return fixtures;
-  const idSet = new Set(leagueIds);
-  return fixtures.filter((f) => idSet.has(f.league.id));
+/** Maps a football-data.org match status to the internal short-status vocabulary used by embeds. */
+function mapStatus(status) {
+  switch (status) {
+    case 'SCHEDULED':
+    case 'TIMED':
+      return 'NS';
+    case 'IN_PLAY':
+      return '1H';
+    case 'PAUSED':
+      return 'HT';
+    case 'FINISHED':
+      return 'FT';
+    case 'SUSPENDED':
+      return 'SUSP';
+    case 'POSTPONED':
+      return 'PST';
+    case 'CANCELLED':
+      return 'CANC';
+    case 'AWARDED':
+      return 'AWD';
+    default:
+      return status;
+  }
 }
 
-async function getFixturesByDate({ date, leagueId, season = config.footballSeason }) {
-  const params = { date };
-  if (leagueId) {
-    params.league = leagueId;
-    params.season = season;
+const FINISHED_SHORT_STATUSES = new Set(['FT', 'AWD']);
+const STOPPED_SHORT_STATUSES = new Set(['FT', 'AWD', 'SUSP', 'PST', 'CANC']);
+
+/** Normalizes a football-data.org match object into the shape the rest of the bot expects. */
+function normalizeMatch(match) {
+  const round = match.stage
+    ? `${match.stage.replaceAll('_', ' ')}${match.matchday ? ` - Matchday ${match.matchday}` : ''}`
+    : match.matchday
+      ? `Matchday ${match.matchday}`
+      : '';
+
+  return {
+    fixture: {
+      id: match.id,
+      date: match.utcDate,
+      status: {
+        short: mapStatus(match.status),
+        long: match.status,
+        elapsed: typeof match.minute === 'number' ? match.minute : null,
+      },
+      referee: match.referees?.[0]?.name || null,
+    },
+    league: {
+      id: match.competition?.code,
+      name: match.competition?.name,
+      country: match.area?.name,
+      logo: match.competition?.emblem,
+      season: match.season?.id,
+      round,
+    },
+    teams: {
+      home: {
+        id: match.homeTeam?.id,
+        name: match.homeTeam?.shortName || match.homeTeam?.name || 'TBD',
+        logo: match.homeTeam?.crest,
+      },
+      away: {
+        id: match.awayTeam?.id,
+        name: match.awayTeam?.shortName || match.awayTeam?.name || 'TBD',
+        logo: match.awayTeam?.crest,
+      },
+    },
+    goals: {
+      home: match.score?.fullTime?.home ?? 0,
+      away: match.score?.fullTime?.away ?? 0,
+    },
+    score: {
+      halftime: match.score?.halfTime || { home: null, away: null },
+      fulltime: match.score?.fullTime || { home: null, away: null },
+    },
+  };
+}
+
+/** All matches currently in play, optionally restricted to a set of competition codes. */
+async function getLiveFixtures(competitionCodes = MAJOR_LEAGUE_IDS) {
+  const params = { status: 'LIVE' };
+  if (competitionCodes && competitionCodes.length > 0) {
+    params.competitions = competitionCodes.join(',');
   }
+  const data = await cached(`live-${(competitionCodes || []).join(',')}`, 30_000, () =>
+    request('/matches', params)
+  );
+  return (data.matches || []).map(normalizeMatch);
+}
+
+async function getFixturesByDate({ date, leagueId }) {
+  const params = { dateFrom: date, dateTo: date };
+  if (leagueId) params.competitions = leagueId;
   const key = `fixtures-date-${date}-${leagueId || 'all'}`;
-  return cached(key, 5 * 60_000, () => request('/fixtures', params));
+  const data = await cached(key, 5 * 60_000, () => request('/matches', params));
+  return (data.matches || []).map(normalizeMatch);
 }
 
+async function getFixturesByTeam({ teamId, status = 'SCHEDULED', limit = 10 }) {
+  const key = `fixtures-team-${teamId}-${status}-${limit}`;
+  const data = await cached(key, 5 * 60_000, () =>
+    request(`/teams/${teamId}/matches`, { status, limit })
+  );
+  return (data.matches || []).map(normalizeMatch);
+}
+
+/** Full match detail — used by the poller to read the live score for diffing. */
 async function getFixtureById(fixtureId) {
-  const response = await cached(`fixture-${fixtureId}`, 15_000, () =>
-    request('/fixtures', { id: fixtureId })
-  );
-  return response[0] || null;
+  const key = `fixture-${fixtureId}`;
+  const data = await cached(key, 20_000, () => request(`/matches/${fixtureId}`));
+  return data ? normalizeMatch(data) : null;
 }
 
-async function getFixturesByTeam({ teamId, next = 10, season = config.footballSeason }) {
-  const key = `fixtures-team-${teamId}-${next}`;
-  return cached(key, 5 * 60_000, () =>
-    request('/fixtures', { team: teamId, next, season })
-  );
+async function getStandings({ leagueId }) {
+  const key = `standings-${leagueId}`;
+  const data = await cached(key, 15 * 60_000, () => request(`/competitions/${leagueId}/standings`));
+  const total = (data.standings || []).find((s) => s.type === 'TOTAL');
+  if (!total) return [];
+  return total.table.map((row) => ({
+    rank: row.position,
+    team: { name: row.team.name },
+    all: { played: row.playedGames, win: row.won, draw: row.draw, lose: row.lost },
+    goalsDiff: row.goalDifference,
+    points: row.points,
+  }));
 }
 
-async function getStandings({ leagueId, season = config.footballSeason }) {
-  const key = `standings-${leagueId}-${season}`;
-  const response = await cached(key, 15 * 60_000, () =>
-    request('/standings', { league: leagueId, season })
-  );
-  return response[0]?.league?.standings?.[0] || [];
+// football-data.org has no team-name search endpoint, so we build one by
+// caching each tracked competition's squad list and searching across them.
+async function getCompetitionTeams(competitionCode) {
+  const key = `competition-teams-${competitionCode}`;
+  const data = await cached(key, 24 * 60 * 60_000, () => request(`/competitions/${competitionCode}/teams`));
+  return data.teams || [];
 }
 
-async function getFixtureEvents(fixtureId) {
-  // Short TTL: this is polled during live matches, so we want fresh data.
-  return cached(`events-${fixtureId}`, 15_000, () => request('/fixtures/events', { fixture: fixtureId }));
-}
-
-async function getFixtureStatistics(fixtureId) {
-  return cached(`stats-${fixtureId}`, 30_000, () =>
-    request('/fixtures/statistics', { fixture: fixtureId })
-  );
+/** Best-effort warm-up so the first `/subscribe` or `/favorite` in a fresh process isn't slow. */
+async function warmTeamCache() {
+  for (const code of MAJOR_LEAGUE_IDS) {
+    try {
+      await getCompetitionTeams(code);
+    } catch (err) {
+      console.warn(`[footballApi] Failed to warm team cache for ${code}:`, err.message);
+    }
+  }
 }
 
 async function searchTeam(name) {
-  const key = `team-search-${name.toLowerCase()}`;
-  return cached(key, 60 * 60_000, () => request('/teams', { search: name }));
+  const needle = name.trim().toLowerCase();
+  const allTeams = (await Promise.all(MAJOR_LEAGUE_IDS.map((code) => getCompetitionTeams(code)))).flat();
+
+  const seen = new Set();
+  const matches = [];
+  for (const team of allTeams) {
+    if (seen.has(team.id)) continue;
+    const haystack = `${team.name} ${team.shortName || ''} ${team.tla || ''}`.toLowerCase();
+    if (haystack.includes(needle)) {
+      seen.add(team.id);
+      matches.push({ team: { id: team.id, name: team.shortName || team.name, logo: team.crest } });
+    }
+  }
+  return matches;
 }
 
-/** Leagues/cups a team is currently competing in (used to resolve a team's primary league). */
-async function getTeamLeagues(teamId) {
-  return cached(`team-leagues-${teamId}`, 60 * 60_000, () =>
-    request('/leagues', { team: teamId, current: 'true' })
+/** Recent finished results for a team, used to build a W-D-L form strip. */
+async function getTeamRecentForm({ teamId, limit = 5 }) {
+  const key = `team-form-${teamId}-${limit}`;
+  const data = await cached(key, 15 * 60_000, () =>
+    request(`/teams/${teamId}/matches`, { status: 'FINISHED', limit })
   );
+  const matches = (data.matches || []).slice().sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate));
+
+  let wins = 0;
+  let draws = 0;
+  let losses = 0;
+  let goalsFor = 0;
+  let goalsAgainst = 0;
+
+  const form = matches
+    .map((m) => {
+      const isHome = m.homeTeam.id === teamId;
+      const gf = isHome ? m.score.fullTime.home : m.score.fullTime.away;
+      const ga = isHome ? m.score.fullTime.away : m.score.fullTime.home;
+      goalsFor += gf ?? 0;
+      goalsAgainst += ga ?? 0;
+      if (gf > ga) {
+        wins += 1;
+        return 'W';
+      }
+      if (gf < ga) {
+        losses += 1;
+        return 'L';
+      }
+      draws += 1;
+      return 'D';
+    })
+    .join('');
+
+  return { form, played: matches.length, wins, draws, losses, goalsFor, goalsAgainst };
 }
 
-async function searchLeague(name) {
-  const key = `league-search-${name.toLowerCase()}`;
-  return cached(key, 60 * 60_000, () => request('/leagues', { search: name }));
-}
-
-async function searchPlayer(name, teamId) {
-  const params = { search: name };
-  if (teamId) params.team = teamId;
-  return cached(`player-search-${name.toLowerCase()}-${teamId || ''}`, 60 * 60_000, () =>
-    request('/players', params)
+async function getTopScorers({ leagueId, limit = 10 }) {
+  const key = `scorers-${leagueId}-${limit}`;
+  const data = await cached(key, 30 * 60_000, () =>
+    request(`/competitions/${leagueId}/scorers`, { limit })
   );
-}
-
-async function getPlayerStats(playerId, season = config.footballSeason) {
-  const response = await cached(`player-stats-${playerId}-${season}`, 30 * 60_000, () =>
-    request('/players', { id: playerId, season })
-  );
-  return response[0] || null;
-}
-
-async function getTeamForm({ teamId, leagueId, season = config.footballSeason }) {
-  const key = `team-stats-${teamId}-${leagueId}-${season}`;
-  const stats = await cached(key, 15 * 60_000, () =>
-    request('/teams/statistics', { team: teamId, league: leagueId, season })
-  );
-  return stats;
+  return data.scorers || [];
 }
 
 module.exports = {
@@ -121,12 +245,10 @@ module.exports = {
   getFixturesByDate,
   getFixturesByTeam,
   getStandings,
-  getFixtureEvents,
-  getFixtureStatistics,
   searchTeam,
-  getTeamLeagues,
-  searchLeague,
-  searchPlayer,
-  getPlayerStats,
-  getTeamForm,
+  warmTeamCache,
+  getTeamRecentForm,
+  getTopScorers,
+  FINISHED_SHORT_STATUSES,
+  STOPPED_SHORT_STATUSES,
 };

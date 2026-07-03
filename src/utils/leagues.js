@@ -1,21 +1,20 @@
-// API-Football (api-sports.io) league IDs for commonly followed competitions.
-// https://www.api-football.com/documentation-v3#tag/Leagues
+// football-data.org v4 competition codes. This is exactly the set of
+// competitions covered by the free tier (10 req/min, no daily cap).
+// https://www.football-data.org/documentation/quickstart
 
 const MAJOR_LEAGUES = {
-  'Premier League': 39,
-  'Championship': 40,
-  'La Liga': 140,
-  'Serie A': 135,
-  'Bundesliga': 78,
-  'Ligue 1': 61,
-  'Eredivisie': 88,
-  'Primeira Liga': 94,
-  'MLS': 253,
-  'Champions League': 2,
-  'Europa League': 3,
-  'Conference League': 848,
-  'World Cup': 1,
-  'Euro Championship': 4,
+  'Premier League': 'PL',
+  'Championship': 'ELC',
+  'La Liga': 'PD',
+  'Serie A': 'SA',
+  'Bundesliga': 'BL1',
+  'Ligue 1': 'FL1',
+  'Eredivisie': 'DED',
+  'Primeira Liga': 'PPL',
+  'Champions League': 'CL',
+  'European Championship': 'EC',
+  'World Cup': 'WC',
+  'Brasileirão': 'BSA',
 };
 
 const MAJOR_LEAGUE_IDS = Object.values(MAJOR_LEAGUES);
@@ -23,10 +22,12 @@ const MAJOR_LEAGUE_IDS = Object.values(MAJOR_LEAGUES);
 function findLeagueByName(name) {
   if (!name) return null;
   const normalized = name.trim().toLowerCase();
-  const match = Object.entries(MAJOR_LEAGUES).find(
-    ([leagueName]) => leagueName.toLowerCase() === normalized
-  );
-  if (match) return { name: match[0], id: match[1] };
+
+  const codeMatch = Object.entries(MAJOR_LEAGUES).find(([, code]) => code.toLowerCase() === normalized);
+  if (codeMatch) return { name: codeMatch[0], id: codeMatch[1] };
+
+  const exact = Object.entries(MAJOR_LEAGUES).find(([leagueName]) => leagueName.toLowerCase() === normalized);
+  if (exact) return { name: exact[0], id: exact[1] };
 
   const partial = Object.entries(MAJOR_LEAGUES).find(([leagueName]) =>
     leagueName.toLowerCase().includes(normalized)

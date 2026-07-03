@@ -4,34 +4,21 @@ const subscriptions = require('../db/subscriptions');
 const teamRoles = require('../db/teamRoles');
 const matchTracking = require('../db/matchTracking');
 const { handleMatchEnd } = require('./matchEndService');
-const { eventEmbed, kickoffPingEmbed } = require('../utils/embeds');
-
-const FINISHED_STATUSES = new Set(['FT', 'AET', 'PEN', 'CANC', 'ABD', 'AWD', 'WO']);
-
-function eventKey(event) {
-  return [
-    event.time.elapsed,
-    event.time.extra || 0,
-    event.type,
-    event.detail,
-    event.player?.id || event.player?.name || '',
-    event.team.id,
-  ].join('|');
-}
+const { goalEmbed, kickoffPingEmbed } = require('../utils/embeds');
 
 /** Channels (with their guild id) that should receive updates for this fixture. */
 function channelsForFixture(fixture) {
   const all = subscriptions.all();
   const relevant = all.filter(
     (s) =>
-      (s.type === 'league' && s.target_id === fixture.league.id) ||
-      (s.type === 'team' && (s.target_id === fixture.teams.home.id || s.target_id === fixture.teams.away.id))
+      (s.type === 'league' && s.target_id === String(fixture.league.id)) ||
+      (s.type === 'team' &&
+        (s.target_id === String(fixture.teams.home.id) || s.target_id === String(fixture.teams.away.id)))
   );
   const seen = new Set();
   return relevant.filter((s) => {
-    const key = s.channel_id;
-    if (seen.has(key)) return false;
-    seen.add(key);
+    if (seen.has(s.channel_id)) return false;
+    seen.add(s.channel_id);
     return true;
   });
 }
@@ -64,19 +51,31 @@ async function processKickoff(client, fixture, channelRows) {
   });
 }
 
-async function processEvents(client, fixture, channelRows) {
-  const events = await footballApi.getFixtureEvents(fixture.fixture.id);
-  for (const event of events) {
-    const key = eventKey(event);
-    if (matchTracking.hasPostedEvent(fixture.fixture.id, key)) continue;
+/**
+ * Posts a goal notification for each newly-scored goal since the last poll.
+ * football-data.org's free tier has no minute-by-minute event feed, so goals
+ * are detected purely by comparing the live scoreline to what we saw last
+ * poll — there's no scorer/assist name, and cards/subs/VAR can't be detected
+ * at all from score alone.
+ */
+async function processScoreChange(client, fixture, channelRows, previous) {
+  if (!previous) return;
 
-    await postToChannels(client, channelRows, (row) => {
-      const isGoal = (event.type || '').toLowerCase() === 'goal';
-      const mention = isGoal ? roleMentionFor(row.guild_id, event.team.id) : null;
-      return { content: mention || undefined, embeds: [eventEmbed(fixture, event)] };
-    });
+  const homeDelta = fixture.goals.home - previous.last_home_goals;
+  const awayDelta = fixture.goals.away - previous.last_away_goals;
 
-    matchTracking.markEventPosted(fixture.fixture.id, key);
+  for (let i = 0; i < homeDelta; i += 1) {
+    await postToChannels(client, channelRows, (row) => ({
+      content: roleMentionFor(row.guild_id, fixture.teams.home.id) || undefined,
+      embeds: [goalEmbed(fixture, fixture.teams.home.name)],
+    }));
+  }
+
+  for (let i = 0; i < awayDelta; i += 1) {
+    await postToChannels(client, channelRows, (row) => ({
+      content: roleMentionFor(row.guild_id, fixture.teams.away.id) || undefined,
+      embeds: [goalEmbed(fixture, fixture.teams.away.name)],
+    }));
   }
 }
 
@@ -87,11 +86,11 @@ async function checkFinishedFixtures(client, stillLiveIds) {
   for (const fixtureId of noLongerLive) {
     const fixture = await footballApi.getFixtureById(fixtureId);
     if (!fixture) continue;
-    if (FINISHED_STATUSES.has(fixture.fixture.status.short)) {
+    if (footballApi.STOPPED_SHORT_STATUSES.has(fixture.fixture.status.short)) {
       await handleMatchEnd(client, fixture);
     } else {
       // Transient gap (e.g. between HT and 2H not reported as "live"); keep tracking.
-      matchTracking.setLastStatus(fixtureId, fixture.fixture.status.short);
+      matchTracking.updateFixtureState(fixtureId, fixture.fixture.status.short, fixture.goals.home, fixture.goals.away);
     }
   }
 }
@@ -106,9 +105,9 @@ async function poll(client) {
   const liveFixtures = await footballApi.getLiveFixtures([]);
   const relevant = liveFixtures.filter(
     (f) =>
-      subscribedLeagueIds.has(f.league.id) ||
-      subscribedTeamIds.has(f.teams.home.id) ||
-      subscribedTeamIds.has(f.teams.away.id)
+      subscribedLeagueIds.has(String(f.league.id)) ||
+      subscribedTeamIds.has(String(f.teams.home.id)) ||
+      subscribedTeamIds.has(String(f.teams.away.id))
   );
 
   for (const fixture of relevant) {
@@ -118,10 +117,11 @@ async function poll(client) {
 
     if (!previous) {
       await processKickoff(client, fixture, channelRows);
+    } else {
+      await processScoreChange(client, fixture, channelRows, previous);
     }
 
-    await processEvents(client, fixture, channelRows);
-    matchTracking.setLastStatus(fixtureId, fixture.fixture.status.short);
+    matchTracking.updateFixtureState(fixtureId, fixture.fixture.status.short, fixture.goals.home, fixture.goals.away);
   }
 
   await checkFinishedFixtures(client, new Set(relevant.map((f) => f.fixture.id)));
